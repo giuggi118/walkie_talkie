@@ -1,121 +1,208 @@
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:record/record.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:web_socket_channel/io.dart';
+import 'package:path_provider/path_provider.dart';
 
 void main() {
-  runApp(const MyApp());
+  runApp(const WalkieTalkieApp());
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class WalkieTalkieApp extends StatelessWidget {
+  const WalkieTalkieApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Walkie Talkie',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: .fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepOrange),
+        useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const WalkieTalkieScreen(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class WalkieTalkieScreen extends StatefulWidget {
+  const WalkieTalkieScreen({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<WalkieTalkieScreen> createState() => _WalkieTalkieScreenState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _WalkieTalkieScreenState extends State<WalkieTalkieScreen> {
+  final AudioRecorder _audioRecorder = AudioRecorder();
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  IOWebSocketChannel? _channel;
 
-  void _incrementCounter() {
+  bool _isConnected = false;
+  bool _isRecording = false;
+  String _statusMessage = 'Disconnesso';
+  String? _tempPath;
+
+  // Inserisci l'URL del tuo server Render (es. wss://walkie-talkie-server.onrender.com)
+  final String _serverUrl = 'wss://walkie-talkie-server.onrender.com';
+
+  @override
+  void initState() {
+    super.initState();
+    _requestPermissions();
+    _connectWebSocket();
+  }
+
+  Future<void> _requestPermissions() async {
+    await Permission.microphone.request();
+  }
+
+  void _connectWebSocket() {
+    try {
+      _channel = IOWebSocketChannel.connect(Uri.parse(_serverUrl));
+      setState(() {
+        _isConnected = true;
+        _statusMessage = 'Connesso al server';
+      });
+
+      _channel!.stream.listen(
+        (data) async {
+          if (data is List<int>) {
+            await _playAudio(data);
+          }
+        },
+        onError: (error) {
+          setState(() {
+            _isConnected = false;
+            _statusMessage = 'Errore di connessione';
+          });
+        },
+        onDone: () {
+          setState(() {
+            _isConnected = false;
+            _statusMessage = 'Disconnesso';
+          });
+        },
+      );
+    } catch (e) {
+      setState(() {
+        _isConnected = false;
+        _statusMessage = 'Impossibile connettersi';
+      });
+    }
+  }
+
+  Future<void> _startRecording() async {
+    if (!_isConnected) return;
+
+    if (await _audioRecorder.hasPermission()) {
+      final Directory tempDir = await getTemporaryDirectory();
+      _tempPath = '${tempDir.path}/audio_temp.aac';
+
+      await _audioRecorder.start(
+        const RecordConfig(encoder: AudioEncoder.aacLc),
+        path: _tempPath!,
+      );
+
+      setState(() {
+        _isRecording = true;
+        _statusMessage = 'Registrazione in corso...';
+      });
+    }
+  }
+
+  Future<void> _stopRecording() async {
+    if (!_isRecording) return;
+
+    final path = await _audioRecorder.stop();
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _isRecording = false;
+      _statusMessage = 'Connesso al server';
     });
+
+    if (path != null && _channel != null) {
+      final bytes = await File(path).readAsBytes();
+      _channel!.sink.add(bytes);
+    }
+  }
+
+  Future<void> _playAudio(List<int> bytes) async {
+    final Directory tempDir = await getTemporaryDirectory();
+    final File tempFile = File('${tempDir.path}/incoming_audio.aac');
+    await tempFile.writeAsBytes(bytes);
+
+    await _audioPlayer.play(DeviceFileSource(tempFile.path));
+  }
+
+  @override
+  void dispose() {
+    _audioRecorder.dispose();
+    _audioPlayer.dispose();
+    _channel?.sink.close();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: const Text('Walkie Talkie'),
+        centerTitle: true,
       ),
       body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: .center,
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Text('You have pushed the button this many times:'),
+            Icon(
+              _isConnected ? Icons.cloud_done : Icons.cloud_off,
+              size: 48,
+              color: _isConnected ? Colors.green : Colors.red,
+            ),
+            const SizedBox(height: 12),
             Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+              _statusMessage,
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500),
+            ),
+            const SizedBox(height: 48),
+            GestureDetector(
+              onTapDown: (_) => _startRecording(),
+              onTapUp: (_) => _stopRecording(),
+              onTapCancel: () => _stopRecording(),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                width: 160,
+                height: 160,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: _isRecording ? Colors.red : Colors.deepOrange,
+                  boxShadow: [
+                    BoxShadow(
+                      color: (_isRecording ? Colors.red : Colors.deepOrange)
+                          .withValues(alpha: 0.4),
+                      blurRadius: 20,
+                      spreadRadius: 5,
+                    )
+                  ],
+                ),
+                child: Icon(
+                  _isRecording ? Icons.mic : Icons.mic_none,
+                  size: 80,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              _isRecording ? 'RILASCIA PER INVIARE' : 'TIENI PREMUTO PER PARLARE',
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.2,
+              ),
             ),
           ],
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
       ),
     );
   }
